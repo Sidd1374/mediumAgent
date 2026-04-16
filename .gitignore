@@ -1,0 +1,26 @@
+# ── Secrets ────────────────────────────
+.env
+session.json
+browser_profile/
+
+# ── Python ─────────────────────────────
+venv/
+medium_venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# ── Runtime data (auto-generated) ─────
+seen_feed.json
+seen_reading_list.json
+logs/
+
+# ── OS junk ────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── IDE ────────────────────────────────
+.vscode/
+.idea/
+*.code-workspace
