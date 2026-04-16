@@ -68,16 +68,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     welcome = (
-        "👋 <b>Welcome to Medium Agent!</b>\n\n"
-        "Here's what I can do:\n\n"
-        "📌 <b>Send me any Medium link</b>\n"
-        "   → I'll summarize the article and give you a free link "
-        "if it's members-only.\n\n"
-        "📧 <b>/mail</b>\n"
-        "   → I'll scan your Medium feed, summarize the top 10 new posts, "
-        "and send them to your email as a newsletter.\n\n"
-        "🤖 All summaries are generated <b>locally</b> using Ollama — "
-        "your data never leaves your PC."
+        "┌─────────────────────────────┐\n"
+        "   🤖  <b>Medium Agent Bot</b>\n"
+        "└─────────────────────────────┘\n\n"
+        "<b>What I can do:</b>\n\n"
+        "📌  <b>Send a Medium link</b>\n"
+        "      I'll fetch the article, generate a\n"
+        "      structured summary with key insights,\n"
+        "      and include a free link if it's paywalled.\n\n"
+        "📧  <b>/mail</b>  or  <b>/mail 5</b>\n"
+        "      Scans your feed, summarizes new posts,\n"
+        "      and emails you a curated digest.\n"
+        "      Default: 10 articles  •  Max: 10\n\n"
+        "─────────────────────────────\n"
+        "🔒  <i>All summaries run locally via Ollama</i>\n"
+        "🛡  <i>Your data never leaves your PC</i>"
     )
     await update.message.reply_text(welcome, parse_mode="HTML")
 
@@ -169,26 +174,49 @@ async def mail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         # Step 9: Report
         if ok:
-            # Build a quick summary of what was sent
+            # Build a polished summary
+            member_count = sum(1 for p in new_posts if p.get("is_member_only"))
+            free_count = len(new_posts) - member_count
+
             post_list = ""
             for i, p in enumerate(new_posts, 1):
-                member_tag = " ⭐" if p.get("is_member_only") else ""
-                post_list += f"  {i}. {_esc(p['title'][:50])}{member_tag}\n"
+                icon = "⭐" if p.get("is_member_only") else "📄"
+                post_list += f"\n  {icon}  <b>{i}.</b> {_esc(p['title'][:48])}"
+                if p.get('author') and p['author'] != 'Unknown author':
+                    post_list += f"\n        <i>by {_esc(p['author'][:30])}</i>"
 
             await status_msg.edit_text(
-                f"✅ <b>Digest sent to your email!</b>\n\n"
-                f"📬 {len(new_posts)} posts summarized:\n"
-                f"{post_list}",
+                f"┌─────────────────────────────┐\n"
+                f"   ✅  <b>Digest Sent!</b>\n"
+                f"└─────────────────────────────┘\n\n"
+                f"📬  Emailed <b>{len(new_posts)}</b> article summaries\n"
+                f"      📄 {free_count} free  •  ⭐ {member_count} members-only\n\n"
+                f"<b>Articles included:</b>\n"
+                f"{post_list}\n\n"
+                f"─────────────────────────────\n"
+                f"📧 <i>Check your inbox!</i>",
                 parse_mode="HTML",
             )
         else:
             await status_msg.edit_text(
-                "❌ Email send failed — check your Gmail credentials in .env"
+                "┌─────────────────────────────┐\n"
+                "   ❌  <b>Email Failed</b>\n"
+                "└─────────────────────────────┘\n\n"
+                "Check your Gmail credentials in <code>.env</code>\n"
+                "  • <code>GMAIL_USER</code>\n"
+                "  • <code>GMAIL_APP_PASSWORD</code>",
+                parse_mode="HTML",
             )
 
     except Exception as e:
         log.error(f"/mail failed: {e}")
-        await status_msg.edit_text(f"❌ Error: {_esc(str(e))}", parse_mode="HTML")
+        await status_msg.edit_text(
+            f"┌─────────────────────────────┐\n"
+            f"   ❌  <b>Error</b>\n"
+            f"└─────────────────────────────┘\n\n"
+            f"{_esc(str(e))}",
+            parse_mode="HTML",
+        )
 
 
 # ── Link handler ───────────────────────────────────────────────────────────────
@@ -229,87 +257,100 @@ async def handle_medium_link(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if has_summary:
             # ── Rich structured summary ──
 
-            # Header
-            member_badge = " ⭐" if article.get("is_member_only") else ""
-            header = (
-                f"📌 <b>{_esc(article.get('title', 'Untitled'))}</b>{member_badge}\n"
-                f"✍️ <i>{_esc(article.get('author', 'Unknown'))}</i>"
-            )
+            title = _esc(article.get('title', 'Untitled'))
+            author = _esc(article.get('author', 'Unknown'))
 
             # Reading time estimate
             word_count = len(article.get("body", "").split())
             read_min = max(1, word_count // 200)
 
-            meta_line = f"\n⏱ {read_min} min read"
+            # Meta badges
+            badges = f"⏱ {read_min} min read"
             if article.get("is_member_only"):
-                meta_line += "  •  🔒 Members-only"
+                badges += "  •  ⭐ Members-only"
 
             # TL;DR
             tldr = article.get("tldr", "")
-            tldr_section = f"\n\n💬 <b>TL;DR</b>\n{_esc(tldr)}" if tldr else ""
+            tldr_block = ""
+            if tldr:
+                tldr_block = (
+                    f"\n\n💬  <b>TL;DR</b>\n"
+                    f"<i>{_esc(tldr)}</i>"
+                )
 
             # Key points
             key_points = article.get("key_points", [])
+            points_block = ""
             if key_points:
-                points = "\n".join(f"  → {_esc(p)}" for p in key_points)
-                points_section = f"\n\n🔍 <b>Key Insights</b>\n{points}"
-            else:
-                points_section = ""
+                points_block = "\n\n🔍  <b>Key Insights</b>\n"
+                for p in key_points:
+                    points_block += f"\n    ▸  {_esc(p)}"
 
             # Takeaway
             takeaway = article.get("takeaway", "")
-            takeaway_section = f"\n\n💡 <b>Takeaway</b>\n{_esc(takeaway)}" if takeaway else ""
+            takeaway_block = ""
+            if takeaway:
+                takeaway_block = (
+                    f"\n\n💡  <b>Takeaway</b>\n"
+                    f"    {_esc(takeaway)}"
+                )
 
             # Tags
             tags = article.get("tags", [])
-            tags_line = ""
+            tags_block = ""
             if tags:
-                tags_line = "\n\n🏷 " + " · ".join(
-                    f"#{_esc(t.replace(' ', '_'))}" for t in tags
-                )
+                tag_str = "  ".join(f"<code>#{_esc(t.replace(' ', '_'))}</code>" for t in tags)
+                tags_block = f"\n\n🏷  {tag_str}"
 
             # Links
-            links_section = f'\n\n🔗 <a href="{url}">Read on Medium →</a>'
+            links_block = f'\n\n🔗  <a href="{url}">Read on Medium →</a>'
             if article.get("freedium_url"):
-                links_section += f'\n🆓 <a href="{article["freedium_url"]}">Read free (Freedium) →</a>'
+                links_block += f'\n🆓  <a href="{article["freedium_url"]}">Read free (no paywall) →</a>'
 
-            # Separator
+            # Assemble
             response = (
-                f"{header}"
-                f"{meta_line}"
-                f"\n{'─' * 28}"
-                f"{tldr_section}"
-                f"{points_section}"
-                f"{takeaway_section}"
-                f"{tags_line}"
-                f"\n{'─' * 28}"
-                f"{links_section}"
+                f"┌─────────────────────────────┐\n"
+                f"   📌  <b>{title}</b>\n"
+                f"└─────────────────────────────┘\n\n"
+                f"✍️  <i>{author}</i>\n"
+                f"{badges}"
+                f"\n─────────────────────────────"
+                f"{tldr_block}"
+                f"{points_block}"
+                f"{takeaway_block}"
+                f"{tags_block}"
+                f"\n─────────────────────────────"
+                f"{links_block}"
             )
 
         elif body_len < 100:
             # ── Extraction failed ──
             response = (
-                f"📌 <b>{_esc(article.get('title', 'Untitled'))}</b>\n"
-                f"by {_esc(article.get('author', 'Unknown'))}\n\n"
-                "⚠️ Could not extract article text.\n\n"
-                "<i>Possible causes:</i>\n"
-                "• Cloudflare blocked the page\n"
-                "• Freedium is down\n"
-                "• Session expired — run <code>python login.py</code>\n\n"
-                f'🔗 <a href="{url}">Read on Medium →</a>'
+                f"┌─────────────────────────────┐\n"
+                f"   ⚠️  <b>Extraction Failed</b>\n"
+                f"└─────────────────────────────┘\n\n"
+                f"📌  {_esc(article.get('title', 'Untitled'))}\n\n"
+                f"<b>Possible causes:</b>\n"
+                f"    ▸  Cloudflare blocked the page\n"
+                f"    ▸  Paywall bypass service is down\n"
+                f"    ▸  Session expired\n\n"
+                f"<b>Fix:</b>  <code>python login.py</code>\n\n"
+                f'🔗  <a href="{url}">Read on Medium →</a>'
             )
             if article.get("freedium_url"):
-                response += f'\n🆓 <a href="{article["freedium_url"]}">Try Freedium →</a>'
+                response += f'\n🆓  <a href="{article["freedium_url"]}">Try free link →</a>'
+
         else:
             # ── Ollama failed ──
             response = (
-                f"📌 <b>{_esc(article.get('title', 'Untitled'))}</b>\n"
-                f"by {_esc(article.get('author', 'Unknown'))}\n\n"
-                "⚠️ Could not generate summary.\n\n"
-                "<i>Check that Ollama is running:</i>\n"
-                "<code>ollama serve</code>\n"
-                "<code>ollama list</code>  (should show your model)\n\n"
-                f'🔗 <a href="{url}">Read on Medium →</a>'
+                f"┌─────────────────────────────┐\n"
+                f"   ⚠️  <b>Summarizer Offline</b>\n"
+                f"└─────────────────────────────┘\n\n"
+                f"📌  {_esc(article.get('title', 'Untitled'))}\n\n"
+                f"<b>Check Ollama:</b>\n"
+                f"    ▸  <code>ollama serve</code>\n"
+                f"    ▸  <code>ollama list</code>\n\n"
+                f'🔗  <a href="{url}">Read on Medium →</a>'
             )
 
         # Send the text summary
