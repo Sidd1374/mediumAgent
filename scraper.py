@@ -839,8 +839,8 @@ async def _scrape_feed_from_page(page: Page, max_posts: int, posts: list) -> boo
     page_title = await page.title()
     log.info(f"Feed page title: {page_title[:60]}")
 
-    # Scroll to load enough posts (Human-like behavior)
-    scrolls = max(4, max_posts // 2)
+    # Scroll to load enough posts (Focused on top/fresh content)
+    scrolls = 4 
     log.info(f"Scrolling {scrolls} times to load feed content...")
     for i in range(scrolls):
         # Detect 500 error mid-scroll
@@ -855,8 +855,14 @@ async def _scrape_feed_from_page(page: Page, max_posts: int, posts: list) -> boo
         await page.evaluate(f"window.scrollBy(0, {scroll_dist})")
         
         # Slower, randomized wait (mimic a person looking at the titles)
-        wait_time = random.uniform(2.3, 3.8)
+        wait_time = random.uniform(1.6, 2.6)
         await asyncio.sleep(wait_time)
+
+        # Optimization: Check if we have enough article elements visible already
+        potential_articles = await page.query_selector_all("article, [data-testid='postCard']")
+        if len(potential_articles) >= max_posts * 1.5:
+             log.info(f"Found {len(potential_articles)} potential articles. Stopping scroll early.")
+             break
 
     # ── Strategy 1: Container-based Scraping ──────────────────────────────────
     articles = await page.query_selector_all("article, [data-testid='postCard'], div.postArticle, div[data-testid='postPreview']")
@@ -973,35 +979,35 @@ async def fetch_article_text(url: str, context: BrowserContext) -> dict:
 
 async def fetch_multiple_articles(posts: list[dict], existing_context=None, headless: bool = False) -> list[dict]:
     """
-    Fetches article body text for each post (one browser, many tabs).
-    If existing_context is provided, reuses it (saves resources).
+    Fetches article body text for each post in parallel (one browser, many tabs).
+    Uses a semaphore to limit concurrency and avoid rate limits.
     """
-    if existing_context:
-        # Reuse existing session
-        for post in posts:
-            article_data = await fetch_article_text(post["url"], existing_context)
+    sem = asyncio.Semaphore(4)  # Process up to 4 articles at once
+
+    async def _sem_fetch(post, ctx):
+        async with sem:
+            article_data = await fetch_article_text(post["url"], ctx)
             post["body"] = article_data["body"]
             post["is_member_only"] = article_data["is_member_only"]
             post["freedium_url"] = _make_freedium_url(post["url"])
+
+            # For members-only articles with weak content, try Freedium immediately
+            if post["is_member_only"] or len(post.get("body", "")) < 200:
+                log.info(f"Trying Freedium for: {post['title'][:50]}")
+                freedium_body = await _fetch_from_freedium(post["url"])
+                if freedium_body:
+                    post["body"] = freedium_body
+                    post["is_member_only"] = True
+
+    if existing_context:
+        tasks = [_sem_fetch(p, existing_context) for p in posts]
+        await asyncio.gather(*tasks)
     else:
-        # Launch new browser (legacy path)
         async with async_playwright() as pw:
             context = await _create_persistent_context(pw, headless=headless)
-            for post in posts:
-                article_data = await fetch_article_text(post["url"], context)
-                post["body"] = article_data["body"]
-                post["is_member_only"] = article_data["is_member_only"]
-                post["freedium_url"] = _make_freedium_url(post["url"])
+            tasks = [_sem_fetch(p, context) for p in posts]
+            await asyncio.gather(*tasks)
             await context.close()
             cleanup_chrome()
-
-    # For members-only articles with weak content, try Freedium
-    for post in posts:
-        if post["is_member_only"] or len(post.get("body", "")) < 200:
-            log.info(f"Trying Freedium for: {post['title'][:50]}")
-            freedium_body = await _fetch_from_freedium(post["url"])
-            if freedium_body:
-                post["body"] = freedium_body
-                post["is_member_only"] = True
 
     return posts
