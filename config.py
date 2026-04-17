@@ -62,3 +62,9 @@ def save_seen(path: Path, seen: set):
 def post_key(url: str) -> str:
     """Stable ID from a URL — used to deduplicate across runs."""
     return hashlib.md5(url.encode()).hexdigest()
+
+# ── Debugging & Performance ────────────────────────────────────────────────────
+# Set to 'true' in .env to enable screenshots and extra logging
+DEBUG_MODE = os.environ.get("DEBUG_MODE", "false").lower() == "true"
+# Set to 'true' in .env to run Chrome in the background
+HEADLESS_MODE = os.environ.get("HEADLESS_MODE", "false").lower() == "true"

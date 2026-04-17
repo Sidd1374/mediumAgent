@@ -1,13 +1,8 @@
 """
-login.py — One-time manual login to Medium.
+login.py -- One-time manual login to Medium.
 
-Opens a visible browser window where you log in to Medium using any method
-(Google, Apple, email magic link, etc.). Once logged in, your session is
-saved in TWO ways:
-  1. session.json — cookies for regular article fetching
-  2. browser_profile/ — full browser profile that includes Cloudflare tokens
-
-Uses anti-detection settings to bypass Cloudflare bot protection.
+Launches your REAL Chrome browser (not Playwright's bundled Chromium) to
+completely bypass Cloudflare detection. Saves your session for the bot.
 
 Usage:
   python login.py
@@ -16,102 +11,197 @@ Re-run this if your session expires (typically lasts weeks/months).
 """
 
 import asyncio
+import subprocess
+import time
 from pathlib import Path
 from playwright.async_api import async_playwright
 from config import log
 
 SESSION_FILE = Path(__file__).parent / "session.json"
-PROFILE_DIR = Path(__file__).parent / "browser_profile"
+PROFILE_DIR = Path(__file__).parent / "playwright_profile"
+
+# Common Chrome install paths on Windows
+_CHROME_PATHS = [
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    Path.home() / "AppData" / "Local" / "Google" / "Chrome" / "Application" / "chrome.exe",
+]
+
+
+def _find_chrome() -> str:
+    """Finds the Chrome executable on the system."""
+    for p in _CHROME_PATHS:
+        if Path(p).exists():
+            return str(p)
+    return ""
 
 
 async def manual_login():
     log.info("=" * 55)
     log.info("Medium Manual Login")
     log.info("=" * 55)
-    log.info("")
-    log.info("A browser window will open. Log in to Medium using")
-    log.info("any method (Google, Apple, email link, etc.).")
-    log.info("")
-    log.info("IMPORTANT: After logging in, STAY in the browser.")
-    log.info("Navigate to https://medium.com/ and make sure you")
-    log.info("can see your feed. Then come back here and press ENTER.")
+    print()
+    print("  Your REAL Chrome browser will open (not Playwright).")
+    print("  This bypasses Cloudflare completely.")
+    print()
+    print("  STEP 1: Log in to Medium using any method")
+    print("          (Google, Apple, email link, etc.).")
+    print()
+    print("  STEP 2: Make sure you can see your Medium feed.")
+    print("          Then come back here and press ENTER.")
+    print()
     log.info("=" * 55)
 
+    chrome_path = _find_chrome()
+    if not chrome_path:
+        log.error("Google Chrome not found at standard paths!")
+        log.error("Please install Chrome or provide the path manually.")
+        return
+
+    log.info(f"Found Chrome: {chrome_path}")
+
+    # Ensure profile directory exists
+    PROFILE_DIR.mkdir(exist_ok=True)
+
+    # ---- Launch REAL Chrome as a standalone process ----
+    # Key: we do NOT use Playwright's launcher, so Chrome has ZERO automation
+    # flags. Cloudflare cannot detect this as automated.
+    debug_port = 9222
+
+    log.info(f"Launching Chrome on port {debug_port}...")
+    chrome_proc = subprocess.Popen(
+        [
+            chrome_path,
+            f"--remote-debugging-port={debug_port}",
+            f"--user-data-dir={PROFILE_DIR}",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-sync",
+            "https://medium.com/",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+    # Wait for Chrome to start and load
+    log.info("Waiting for Chrome to start...")
+    await asyncio.sleep(5)
+
+    # Check Chrome is alive
+    if chrome_proc.poll() is not None:
+        log.error(f"Chrome exited immediately with code {chrome_proc.returncode}.")
+        log.error("Try closing all other Chrome windows first, then run again.")
+        return
+
+    log.info("Chrome is running. Connecting via CDP...")
+
+    # ---- Connect Playwright to running Chrome ----
     async with async_playwright() as pw:
-        # Use persistent context — saves full browser state including Cloudflare tokens
-        context = await pw.chromium.launch_persistent_context(
-            user_data_dir=str(PROFILE_DIR),
-            headless=False,  # visible browser
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-            ],
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1280, "height": 800},
-            locale="en-US",
-            timezone_id="Asia/Kolkata",
-        )
+        browser = None
+        try:
+            browser = await pw.chromium.connect_over_cdp(
+                f"http://localhost:{debug_port}",
+                timeout=10_000,
+            )
+        except Exception as e:
+            log.error(f"Could not connect to Chrome: {e}")
+            log.error("Make sure no other process is using port 9222.")
+            chrome_proc.terminate()
+            return
 
-        # Remove the "webdriver" flag
-        page = context.pages[0] if context.pages else await context.new_page()
-        await page.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined
-            });
-        """)
+        contexts = browser.contexts
+        if not contexts:
+            log.error("No browser context found. Chrome may not have started properly.")
+            await browser.close()
+            chrome_proc.terminate()
+            return
 
-        # Navigate to Medium sign-in
-        log.info("Opening Medium...")
-        await page.goto("https://medium.com/m/signin", wait_until="domcontentloaded")
+        context = contexts[0]
+        pages = context.pages
 
-        # Wait for user to complete login
-        input("\n✅ Press ENTER after you've logged in and can see your Medium feed...\n")
-
-        # Navigate to home to verify login (don't rely on signin page URL)
-        log.info("Checking login status...")
-        await page.goto("https://medium.com/", wait_until="domcontentloaded")
-        await asyncio.sleep(3)
-
-        # Check for Cloudflare first
-        title = await page.title()
-        if "just a moment" in title.lower():
-            log.info("Waiting for Cloudflare to clear...")
-            for _ in range(15):
-                await asyncio.sleep(1)
-                title = await page.title()
-                if "just a moment" not in title.lower():
-                    break
-
-        # Check if we're on the actual Medium page (not signin)
-        current_url = page.url
-        log.info(f"Current URL: {current_url}")
-        log.info(f"Page title: {title[:60]}")
-
-        if "signin" in current_url or "login" in current_url:
-            log.warning("⚠️  It looks like login didn't complete.")
-            log.warning("     You may need to log in again in the browser.")
-            proceed = input("Save session anyway? (y/n): ").strip().lower()
-            if proceed != "y":
-                log.info("Cancelled. No session saved.")
-                await context.close()
-                return
+        if pages:
+            page = pages[0]
+            title = await page.title()
+            log.info(f"Chrome loaded: {title[:60]}")
         else:
-            log.info("✅ Login verified — you're on Medium!")
+            log.info("Chrome opened. Navigate to medium.com in the browser.")
 
-        # Save storage_state as session.json
-        await context.storage_state(path=str(SESSION_FILE))
-        log.info(f"✅ Session saved to {SESSION_FILE}")
-        log.info(f"✅ Browser profile saved to {PROFILE_DIR}/")
+        # ---- Wait for user to log in ----
 
-        log.info("")
-        log.info("The bot will now use this session for all scraping.")
-        log.info("Re-run this script if your session expires.")
+        input("\n[OK] Press ENTER after you've logged in and can see your Medium feed...\n")
 
-        await context.close()
+        # ---- Verify login ----
+
+        log.info("Verifying login and clearing any final Cloudflare checks...")
+        if pages:
+            page = pages[0]
+
+            # Navigate to medium.com to confirm login and force a fresh check
+            try:
+                await page.goto("https://medium.com/", wait_until="networkidle", timeout=30_000)
+            except Exception:
+                pass
+
+            # Wait for either the feed OR a sign-in button (to see if we failed)
+            # Medium feed often has articles with data-testid="postCard" or specific structure
+            success = False
+            for _ in range(20):
+                title = (await page.title()).lower()
+                url = page.url
+                
+                # Check for Cloudflare stuckness
+                if "just a moment" in title or "security verification" in title:
+                    log.info("Still seeing Cloudflare... waiting...")
+                    await asyncio.sleep(2)
+                    continue
+
+                # Check for successful feed load
+                # Common Medium feed selectors: article, [data-testid="postCard"], h2
+                articles = await page.query_selector_all("article, [data-testid='postCard'], h2")
+                if len(articles) > 3 and "signin" not in url and "login" not in url:
+                    log.info(f"[OK] Found {len(articles)} articles. Login verified!")
+                    success = True
+                    break
+                
+                log.info("Waiting for feed elements to appear...")
+                await asyncio.sleep(2)
+
+            if not success:
+                log.warning("[!] Could not verify feed elements.")
+                log.warning("    If you ARE looking at your feed, you can still save.")
+                proceed = input("    Save session anyway? (y/n): ").strip().lower()
+                if proceed != "y":
+                    log.info("Cancelled. No session saved.")
+                    await browser.close()
+                    chrome_proc.terminate()
+                    return
+            else:
+                log.info("[OK] Login verified -- you're on your Medium feed!")
+
+        # ---- Save session ----
+
+        try:
+            await context.storage_state(path=str(SESSION_FILE))
+            log.info(f"[OK] Session saved to {SESSION_FILE}")
+            log.info(f"[OK] Browser profile saved to {PROFILE_DIR}/")
+        except Exception as e:
+            log.error(f"Failed to save session: {e}")
+
+        print()
+        print("  Done! The bot will now use this session.")
+        print("  Re-run this script if your session expires.")
+
+        # ---- Cleanup ----
+        await browser.close()
+
+    # Close Chrome
+    chrome_proc.terminate()
+    try:
+        chrome_proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        chrome_proc.kill()
+
+    log.info("Chrome closed. Login complete.")
 
 
 if __name__ == "__main__":

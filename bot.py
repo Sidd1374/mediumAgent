@@ -31,8 +31,16 @@ from config import (
     load_seen,
     save_seen,
     post_key,
+    HEADLESS_MODE,
 )
-from scraper import fetch_single_article, get_feed_posts, fetch_multiple_articles
+from playwright.async_api import async_playwright
+from scraper import (
+    fetch_single_article, 
+    get_feed_posts, 
+    fetch_multiple_articles, 
+    _create_persistent_context, 
+    cleanup_chrome
+)
 from summarizer import summarize_post, summarize_all
 from gmail_sender import send_feed_digest
 
@@ -134,37 +142,53 @@ async def mail_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         seen = load_seen(SEEN_FEED_FILE)
         log.info(f"/mail — Known feed posts: {len(seen)}")
 
-        # Step 3: Scrape feed
-        all_posts = await get_feed_posts(max_posts=MAX_FEED_POSTS * 3)
-
-        if not all_posts:
-            await status_msg.edit_text("😕 No posts found in your feed. Try again later.")
-            return
-
-        # Step 4: Filter to unseen
-        new_posts = [p for p in all_posts if post_key(p["url"]) not in seen]
-        new_posts = new_posts[:count]
-
-        if not new_posts:
-            await status_msg.edit_text(
-                "✅ All feed posts were already sent in a previous digest. "
-                "No new posts to email."
+        # Start Playwright once for the entire digest process
+        async with async_playwright() as pw:
+            # Step 3: Launch browser (uses HEADLESS_MODE from .env)
+            context = await _create_persistent_context(pw, headless=HEADLESS_MODE)
+            
+            # Step 4: Scrape feed using the shared context
+            all_posts = await get_feed_posts(
+                max_posts=MAX_FEED_POSTS * 3, 
+                existing_context=context
             )
-            return
 
-        await status_msg.edit_text(
-            f"📰 Found <b>{len(new_posts)}</b> new posts. "
-            f"Fetching articles & summarizing...",
-            parse_mode="HTML",
-        )
+            if not all_posts:
+                await context.close()
+                cleanup_chrome()
+                await status_msg.edit_text("😕 No posts found in your feed. Try again later.")
+                return
 
-        # Step 5: Fetch article text (with Freedium for paywalled ones)
-        new_posts = await fetch_multiple_articles(new_posts)
+            # Step 5: Filter to unseen
+            new_posts = [p for p in all_posts if post_key(p["url"]) not in seen]
+            new_posts = new_posts[:count]
 
-        # Step 6: Summarize
+            if not new_posts:
+                await context.close()
+                cleanup_chrome()
+                await status_msg.edit_text(
+                    "✅ All feed posts were already sent in a previous digest. "
+                    "No new posts to email."
+                )
+                return
+
+            await status_msg.edit_text(
+                f"📰 Found <b>{len(new_posts)}</b> new posts. "
+                f"Fetching articles & summarizing...",
+                parse_mode="HTML",
+            )
+
+            # Step 6: Fetch article text (reusing the SAME context)
+            new_posts = await fetch_multiple_articles(new_posts, existing_context=context)
+            
+            # Close browser as soon as scraping is done
+            await context.close()
+            cleanup_chrome()
+
+        # Step 7: Summarize (CPU intensive, not browser dependent)
         new_posts = summarize_all(new_posts)
 
-        # Step 7: Send email
+        # Step 8: Send email
         ok = send_feed_digest(new_posts)
 
         # Step 8: Mark as seen
